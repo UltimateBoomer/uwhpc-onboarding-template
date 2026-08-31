@@ -20,7 +20,7 @@ public:
       : rows_(rows), cols_(cols), data(rows * cols) {}
 
   double &operator()(std::size_t i, std::size_t j) {
-    return data[i * rows_ + j];
+    return data[i * cols_ + j];
   }
 
   double operator()(std::size_t i, std::size_t j) const {
