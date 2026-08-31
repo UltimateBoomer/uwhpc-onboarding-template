@@ -34,21 +34,29 @@ public:
 // Apply the five-point stencil over all interior points, copying the boundary
 // values unchanged from old_grid to new_grid. Implement your solution here.
 void apply_stencil(const Grid &old_grid, Grid &new_grid) {
-  for (std::size_t i = 0; i < new_grid.get_rows(); ++i) {
-    for (std::size_t j = 0; j < new_grid.get_cols(); ++j) {
-      if (i == 0 || i == new_grid.get_rows() - 1 || j == 0 || j == new_grid.get_cols() - 1) {
-        // Boundary cell, keep old value
-        new_grid(i, j) = old_grid(i, j);
-      } else {
-        // Internal cell, apply kernel
-        double s1 = old_grid(i - 1, j);
-        double s2 = old_grid(i, j - 1);
-        double s3 = old_grid(i, j);
-        double s4 = old_grid(i, j + 1);
-        double s5 = old_grid(i + 1, j);
+  auto h = old_grid.get_rows();
+  auto w = old_grid.get_cols();
 
-        new_grid(i, j) = 0.125 * (s1 + s2 + s4 + s5) + 0.5 * s3;
-      }
+  // Copy boundary
+  for (std::size_t i = 0; i < h; ++i) {
+    new_grid(i, 0) = old_grid(i, 0);
+    new_grid(i, w - 1) = old_grid(i, w - 1);
+  }
+  for (std::size_t j = 0; j < w; ++j) {
+    new_grid(0, j) = old_grid(0, j);
+    new_grid(h - 1, j) = old_grid(h - 1, j);
+  }
+
+  // Apply kernel to interior cells
+  for (std::size_t i = 1; i < h - 1; ++i) {
+    for (std::size_t j = 1; j < w - 1; ++j) {
+      double s1 = old_grid(i - 1, j);
+      double s2 = old_grid(i, j - 1);
+      double s3 = old_grid(i, j);
+      double s4 = old_grid(i, j + 1);
+      double s5 = old_grid(i + 1, j);
+
+      new_grid(i, j) = 0.125 * (s1 + s2 + s4 + s5) + 0.5 * s3;
     }
   }
 }
