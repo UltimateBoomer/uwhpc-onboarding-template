@@ -37,21 +37,23 @@ void apply_stencil(const Grid &old_grid, Grid &new_grid) {
   auto h = old_grid.get_rows();
   auto w = old_grid.get_cols();
 
+  if (w == 0 || h == 0) return;
+
   // Copy boundary
-  for (std::size_t i = 0; i < h; ++i) {
+  for (std::ptrdiff_t i = 0; i < h; ++i) {
     new_grid(i, 0) = old_grid(i, 0);
     new_grid(i, w - 1) = old_grid(i, w - 1);
   }
-  for (std::size_t j = 0; j < w; ++j) {
+  for (std::ptrdiff_t j = 1; j < w - 1; ++j) {
     new_grid(0, j) = old_grid(0, j);
     new_grid(h - 1, j) = old_grid(h - 1, j);
   }
 
   // Apply kernel to interior cells
   #pragma omp parallel for schedule(static)
-  for (std::size_t i = 1; i < h - 1; ++i) {
+  for (std::ptrdiff_t i = 1; i < h - 1; ++i) {
     #pragma omp simd
-    for (std::size_t j = 1; j < w - 1; ++j) {
+    for (std::ptrdiff_t j = 1; j < w - 1; ++j) {
       double s1 = old_grid(i - 1, j);
       double s2 = old_grid(i, j - 1);
       double s3 = old_grid(i, j);
