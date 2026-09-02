@@ -72,7 +72,7 @@ void apply_stencil(const Grid &old_grid, Grid &new_grid) {
   }
 
   // Apply kernel to interior cells
-  #pragma omp parallel for schedule(static)
+  #pragma omp simd
   for (std::size_t i = 1; i < rows - 1; ++i) {
     // Pointer to adjacent rows, may be beneficial to cache locality
     const auto above = old_data + (i - 1) * cols;
