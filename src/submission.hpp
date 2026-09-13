@@ -1,7 +1,35 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
+
+namespace {
+
+inline constexpr std::size_t openmp_min_cells = 4096;
+
+// Apply one logical row through random-access iterators. std::vector iterators
+// compile to the same address calculations as pointers in optimized builds.
+template <typename InputIterator, typename OutputIterator>
+inline void apply_stencil_row(InputIterator above, InputIterator center,
+                              InputIterator below, OutputIterator output,
+                              std::size_t cols) noexcept {
+  output[0] = center[0];
+  output[cols - 1] = center[cols - 1];
+
+  // Using SIMD between cells due to independence, apply the stencil kernel to
+  // the interior of the row.
+#pragma omp simd
+  for (std::size_t j = 1; j < cols - 1; ++j) {
+    output[j] = 0.125 * (above[j] + center[j - 1] + center[j + 1] + below[j]) +
+                0.5 * center[j];
+  }
+}
+
+} // namespace
+
+class Grid;
+inline void apply_stencil(const Grid &old_grid, Grid &new_grid);
 
 // Starter Grid for the 2D heat-diffusion problem.
 //
@@ -12,13 +40,13 @@ class Grid {
 private:
   std::size_t rows_;
   std::size_t cols_;
-  std::vector<double> data; // flat grid data stored by rows
+  std::vector<double> data;
 
-public:
   using iterator = std::vector<double>::iterator;
   using const_iterator = std::vector<double>::const_iterator;
 
-  // Initializes a zero-filled grid with specified size
+public:
+  // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
       : rows_(rows), cols_(cols), data(rows * cols) {}
 
@@ -27,67 +55,63 @@ public:
   }
 
   double operator()(std::size_t i, std::size_t j) const {
-    return (*const_cast<Grid*>(this))(i, j);
+    return data[i * cols_ + j];
   }
 
-  std::size_t get_rows() const { return rows_; }
-  std::size_t get_cols() const { return cols_; }
+  std::size_t get_rows() const noexcept { return rows_; }
+  std::size_t get_cols() const noexcept { return cols_; }
 
-  // Iterator to access grid data, provides abstraction over raw pointer access
-  iterator data_begin() { return data.begin(); }
-  const_iterator data_begin() const { return data.cbegin(); }
+  // Returns iterator to the beginning of a row.
+  iterator row_begin(std::size_t row) noexcept {
+    return data.begin() + row * cols_;
+  }
+
+  // Returns iterator to the beginning of a row.
+  const_iterator row_begin(std::size_t row) const noexcept {
+    return data.cbegin() + row * cols_;
+  }
 };
 
 // Apply the five-point stencil over all interior points, copying the boundary
 // values unchanged from old_grid to new_grid. Implement your solution here.
-void apply_stencil(const Grid &old_grid, Grid &new_grid) {
+inline void apply_stencil(const Grid &old_grid, Grid &new_grid) {
   const std::size_t rows = old_grid.get_rows();
   const std::size_t cols = old_grid.get_cols();
 
-  if (cols == 0 || rows == 0) return;
+  // Empty grid
+  if (cols == 0 || rows == 0)
+    return;
 
-  const auto old_data = old_grid.data_begin();
-  const auto new_data = new_grid.data_begin();
-
-  for (std::size_t j = 0; j < cols; ++j) {
-    new_data[j] = old_data[j];
-  }
+  // Copy boundary rows
+  std::copy_n(old_grid.row_begin(0), cols, new_grid.row_begin(0));
 
   if (rows > 1) {
-    const std::size_t last_row = (rows - 1) * cols;
-    for (std::size_t j = 0; j < cols; ++j) {
-      new_data[last_row + j] = old_data[last_row + j];
-    }
+    std::copy_n(old_grid.row_begin(rows - 1), cols,
+                new_grid.row_begin(rows - 1));
   }
 
-  if (rows < 3) return;
+  // With less than 3 rows, the copied rows cover the entire grid.
+  if (rows < 3)
+    return;
 
+  // With less than 3 columns, every cell is on a boundary.
   if (cols < 3) {
     for (std::size_t i = 1; i < rows - 1; ++i) {
-      const std::size_t row = i * cols;
-      new_data[row] = old_data[row];
-      if (cols == 2) new_data[row + 1] = old_data[row + 1];
+      const auto old_row = old_grid.row_begin(i);
+      const auto new_row = new_grid.row_begin(i);
+      new_row[0] = old_row[0];
+      if (cols == 2)
+        new_row[1] = old_row[1];
     }
     return;
   }
 
-  // Apply kernel to interior cells
-  #pragma omp parallel for schedule(static)
+// Apply kernel to interior cells. Each cell can be processed independently, we
+// parallelize over rows to ensure each thread receives an exclusive cache-local
+// reference of the data.
+#pragma omp parallel for schedule(static) if (rows * cols >= openmp_min_cells)
   for (std::size_t i = 1; i < rows - 1; ++i) {
-    // Pointer to adjacent rows, may be beneficial to cache locality
-    const auto above = old_data + (i - 1) * cols;
-    const auto center = old_data + i * cols;
-    const auto below = old_data + (i + 1) * cols;
-    const auto output = new_data + i * cols;
-
-    output[0] = center[0];
-    output[cols - 1] = center[cols - 1];
-
-    #pragma omp simd
-    for (std::size_t j = 1; j < cols - 1; ++j) {
-      output[j] = 0.125 * (above[j] + center[j - 1] +
-                           center[j + 1] + below[j]) +
-                  0.5 * center[j];
-    }
+    apply_stencil_row(old_grid.row_begin(i - 1), old_grid.row_begin(i),
+                      old_grid.row_begin(i + 1), new_grid.row_begin(i), cols);
   }
 }
