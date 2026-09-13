@@ -6,7 +6,7 @@
 
 namespace {
 
-inline constexpr std::size_t openmp_min_cells = 8192;
+inline constexpr std::size_t openmp_min_cells = 4096;
 
 } // namespace
 
