@@ -6,7 +6,7 @@
 
 namespace {
 
-inline constexpr std::size_t openmp_min_cells = 4096;
+inline constexpr std::size_t openmp_min_cells = 8192;
 
 // Apply one logical row through random-access iterators. std::vector iterators
 // compile to the same address calculations as pointers in optimized builds.
@@ -106,10 +106,17 @@ inline void apply_stencil(const Grid &old_grid, Grid &new_grid) {
     return;
   }
 
-// Apply kernel to interior cells. Each cell can be processed independently, we
-// parallelize over rows to ensure each thread receives an exclusive cache-local
-// reference of the data.
-#pragma omp parallel for schedule(static) if (rows * cols >= openmp_min_cells)
+  // Avoid parallelization when the grid is too small.
+  if (rows * cols < openmp_min_cells) {
+    for (std::size_t i = 1; i < rows - 1; ++i) {
+      apply_stencil_row(old_grid.row_begin(i - 1), old_grid.row_begin(i),
+                        old_grid.row_begin(i + 1), new_grid.row_begin(i), cols);
+    }
+    return;
+  }
+
+  // Each row is independent, giving every thread exclusive cache-local output.
+#pragma omp parallel for schedule(static)
   for (std::size_t i = 1; i < rows - 1; ++i) {
     apply_stencil_row(old_grid.row_begin(i - 1), old_grid.row_begin(i),
                       old_grid.row_begin(i + 1), new_grid.row_begin(i), cols);
