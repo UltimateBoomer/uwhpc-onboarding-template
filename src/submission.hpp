@@ -4,14 +4,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace {
-
-inline constexpr std::size_t openmp_min_cells = 4096;
-
-} // namespace
-
-class Grid;
-inline void apply_stencil(const Grid &old_grid, Grid &new_grid);
+inline constexpr std::size_t OPENMP_MIN_CELLS = 4096;
 
 // Starter Grid for the 2D heat-diffusion problem.
 //
@@ -80,7 +73,7 @@ inline void apply_stencil_interior(const Grid &old_grid, Grid &new_grid) {
 
   // Process each row in parallel, giving every thread exclusive cache-local
   // output.
-#pragma omp parallel for schedule(static) if (rows * cols >= openmp_min_cells)
+#pragma omp parallel for schedule(static) if (rows * cols >= OPENMP_MIN_CELLS)
   for (std::size_t i = 1; i < rows - 1; ++i) {
     apply_stencil_row(old_grid.row_begin(i - 1), old_grid.row_begin(i),
                       old_grid.row_begin(i + 1), new_grid.row_begin(i), cols);
