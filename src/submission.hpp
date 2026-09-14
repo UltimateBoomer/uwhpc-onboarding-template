@@ -8,6 +8,9 @@
 
 inline constexpr std::size_t OPENMP_MIN_CELLS = 4096;
 inline constexpr std::size_t CACHE_LINE_SIZE = 64;
+inline constexpr std::size_t CACHE_LINE_ELEMENTS =
+    CACHE_LINE_SIZE / sizeof(double);
+inline constexpr std::size_t ROW_PREFIX_ELEMENTS = CACHE_LINE_ELEMENTS - 1;
 
 template <typename T, std::size_t Alignment> class AlignedAllocator {
 public:
@@ -62,6 +65,7 @@ private:
 
   std::size_t rows_;
   std::size_t cols_;
+  std::size_t stride_;
   storage_type data;
 
 public:
@@ -70,14 +74,17 @@ public:
 
   // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
-      : rows_(rows), cols_(cols), data(rows * cols) {}
+      : rows_(rows), cols_(cols),
+        stride_((cols + ROW_PREFIX_ELEMENTS + CACHE_LINE_ELEMENTS - 1) /
+                CACHE_LINE_ELEMENTS * CACHE_LINE_ELEMENTS),
+        data(rows * stride_) {}
 
   double &operator()(std::size_t i, std::size_t j) {
-    return data[i * cols_ + j];
+    return data[ROW_PREFIX_ELEMENTS + i * stride_ + j];
   }
 
   double operator()(std::size_t i, std::size_t j) const {
-    return data[i * cols_ + j];
+    return data[ROW_PREFIX_ELEMENTS + i * stride_ + j];
   }
 
   std::size_t get_rows() const noexcept { return rows_; }
@@ -85,30 +92,28 @@ public:
 
   // Returns iterator to the beginning of a row.
   iterator row_begin(std::size_t row) noexcept {
-    return data.begin() + row * cols_;
+    return data.begin() + ROW_PREFIX_ELEMENTS + row * stride_;
   }
 
   // Returns iterator to the beginning of a row.
   const_iterator row_begin(std::size_t row) const noexcept {
-    return data.cbegin() + row * cols_;
+    return data.cbegin() + ROW_PREFIX_ELEMENTS + row * stride_;
   }
 };
 
 namespace {
 
-// Apply one logical row through random-access iterators. Grid iterators retain
-// the storage abstraction while compiling to direct address calculations.
-inline void apply_stencil_row(Grid::const_iterator above,
-                              Grid::const_iterator center,
-                              Grid::const_iterator below, Grid::iterator output,
-                              std::size_t cols) noexcept {
-  output[0] = center[0];
-  output[cols - 1] = center[cols - 1];
+// Apply one logical row through pointers to its aligned first interior cell.
+inline void apply_stencil_row(const double *above, const double *center,
+                              const double *below, double *output,
+                              std::size_t interior_cols) noexcept {
+  output[-1] = center[-1];
+  output[interior_cols] = center[interior_cols];
 
   // Using SIMD between cells due to independence, apply the stencil kernel to
   // the interior of the row.
-#pragma omp simd
-  for (std::size_t j = 1; j < cols - 1; ++j) {
+#pragma omp simd aligned(above, center, below, output : CACHE_LINE_SIZE)
+  for (std::size_t j = 0; j < interior_cols; ++j) {
     output[j] = 0.125 * (above[j] + center[j - 1] + center[j + 1] + below[j]) +
                 0.5 * center[j];
   }
@@ -122,8 +127,9 @@ inline void apply_stencil_interior(const Grid &old_grid, Grid &new_grid) {
   // output.
 #pragma omp parallel for schedule(static) if (rows * cols >= OPENMP_MIN_CELLS)
   for (std::size_t i = 1; i < rows - 1; ++i) {
-    apply_stencil_row(old_grid.row_begin(i - 1), old_grid.row_begin(i),
-                      old_grid.row_begin(i + 1), new_grid.row_begin(i), cols);
+    apply_stencil_row(
+        &*old_grid.row_begin(i - 1) + 1, &*old_grid.row_begin(i) + 1,
+        &*old_grid.row_begin(i + 1) + 1, &*new_grid.row_begin(i) + 1, cols - 2);
   }
 }
 
