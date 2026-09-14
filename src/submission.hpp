@@ -103,19 +103,28 @@ public:
 
 namespace {
 
-// Apply one logical row through pointers to its aligned first interior cell.
-inline void apply_stencil_row(const double *above, const double *center,
-                              const double *below, double *output,
+// Apply one logical row from iterators to its aligned first interior cell.
+inline void apply_stencil_row(Grid::const_iterator above,
+                              Grid::const_iterator center,
+                              Grid::const_iterator below, Grid::iterator output,
                               std::size_t interior_cols) noexcept {
   output[-1] = center[-1];
   output[interior_cols] = center[interior_cols];
 
+  // Extract raw pointers, required for compiler to output aligned SIMD code.
+  const double *const above_data = &*above;
+  const double *const center_data = &*center;
+  const double *const below_data = &*below;
+  double *const output_data = &*output;
+
   // Using SIMD between cells due to independence, apply the stencil kernel to
   // the interior of the row.
-#pragma omp simd aligned(above, center, below, output : CACHE_LINE_SIZE)
+#pragma omp simd aligned(above_data, center_data, below_data,                  \
+                             output_data : CACHE_LINE_SIZE)
   for (std::size_t j = 0; j < interior_cols; ++j) {
-    output[j] = 0.125 * (above[j] + center[j - 1] + center[j + 1] + below[j]) +
-                0.5 * center[j];
+    output_data[j] = 0.125 * (above_data[j] + center_data[j - 1] +
+                              center_data[j + 1] + below_data[j]) +
+                     0.5 * center_data[j];
   }
 }
 
@@ -127,9 +136,9 @@ inline void apply_stencil_interior(const Grid &old_grid, Grid &new_grid) {
   // output.
 #pragma omp parallel for schedule(static) if (rows * cols >= OPENMP_MIN_CELLS)
   for (std::size_t i = 1; i < rows - 1; ++i) {
-    apply_stencil_row(
-        &*old_grid.row_begin(i - 1) + 1, &*old_grid.row_begin(i) + 1,
-        &*old_grid.row_begin(i + 1) + 1, &*new_grid.row_begin(i) + 1, cols - 2);
+    apply_stencil_row(old_grid.row_begin(i - 1) + 1, old_grid.row_begin(i) + 1,
+                      old_grid.row_begin(i + 1) + 1, new_grid.row_begin(i) + 1,
+                      cols - 2);
   }
 }
 
