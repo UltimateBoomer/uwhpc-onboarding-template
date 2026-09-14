@@ -2,9 +2,53 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
+#include <new>
 #include <vector>
 
 inline constexpr std::size_t OPENMP_MIN_CELLS = 4096;
+inline constexpr std::size_t CACHE_LINE_SIZE = 64;
+
+template <typename T, std::size_t Alignment> class AlignedAllocator {
+public:
+  using value_type = T;
+
+  static_assert(Alignment >= alignof(T));
+  static_assert((Alignment & (Alignment - 1)) == 0);
+
+  AlignedAllocator() noexcept = default;
+
+  template <typename U>
+  AlignedAllocator(const AlignedAllocator<U, Alignment> &) noexcept {}
+
+  [[nodiscard]] T *allocate(std::size_t count) {
+    if (count > std::numeric_limits<std::size_t>::max() / sizeof(T))
+      throw std::bad_array_new_length{};
+
+    return static_cast<T *>(
+        ::operator new(count * sizeof(T), std::align_val_t{Alignment}));
+  }
+
+  void deallocate(T *pointer, std::size_t) noexcept {
+    ::operator delete(pointer, std::align_val_t{Alignment});
+  }
+
+  template <typename U> struct rebind {
+    using other = AlignedAllocator<U, Alignment>;
+  };
+};
+
+template <typename T, typename U, std::size_t Alignment>
+bool operator==(const AlignedAllocator<T, Alignment> &,
+                const AlignedAllocator<U, Alignment> &) noexcept {
+  return true;
+}
+
+template <typename T, typename U, std::size_t Alignment>
+bool operator!=(const AlignedAllocator<T, Alignment> &,
+                const AlignedAllocator<U, Alignment> &) noexcept {
+  return false;
+}
 
 // Starter Grid for the 2D heat-diffusion problem.
 //
@@ -13,13 +57,16 @@ inline constexpr std::size_t OPENMP_MIN_CELLS = 4096;
 // everything else is yours.
 class Grid {
 private:
+  using storage_type =
+      std::vector<double, AlignedAllocator<double, CACHE_LINE_SIZE>>;
+
   std::size_t rows_;
   std::size_t cols_;
-  std::vector<double> data;
+  storage_type data;
 
 public:
-  using iterator = std::vector<double>::iterator;
-  using const_iterator = std::vector<double>::const_iterator;
+  using iterator = storage_type::iterator;
+  using const_iterator = storage_type::const_iterator;
 
   // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
