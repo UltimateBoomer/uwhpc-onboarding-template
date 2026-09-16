@@ -53,6 +53,37 @@ bool operator!=(const AlignedAllocator<T, Alignment> &,
   return false;
 }
 
+// Non-owning view of a logical row, excluding storage padding. The caller must
+// ensure the pointer is AlignmentOffset bytes past an Alignment-byte boundary.
+template <typename T, std::size_t Alignment = alignof(T),
+          std::size_t AlignmentOffset = 0>
+class RowView {
+  static_assert(Alignment >= alignof(T));
+  static_assert((Alignment & (Alignment - 1)) == 0);
+  static_assert(AlignmentOffset < Alignment);
+  static_assert(AlignmentOffset % alignof(T) == 0);
+
+  T *data_;
+  std::size_t size_;
+
+public:
+  constexpr RowView(T *data, std::size_t size) noexcept
+      : data_(data), size_(size) {}
+
+  T &operator[](std::size_t j) const noexcept { return data()[j]; }
+  T *data() const noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+    return static_cast<T *>(
+        __builtin_assume_aligned(data_, Alignment, AlignmentOffset));
+#else
+    return data_;
+#endif
+  }
+  constexpr std::size_t size() const noexcept { return size_; }
+  T *begin() const noexcept { return data(); }
+  T *end() const noexcept { return size_ == 0 ? data() : data() + size_; }
+};
+
 // Starter Grid for the 2D heat-diffusion problem.
 //
 // The evaluation harness uses operator() to set initial conditions and to read
@@ -69,8 +100,10 @@ private:
   storage_type data;
 
 public:
-  using iterator = storage_type::iterator;
-  using const_iterator = storage_type::const_iterator;
+  using row_view =
+      RowView<double, CACHE_LINE_SIZE, ROW_PREFIX_ELEMENTS * sizeof(double)>;
+  using const_row_view = RowView<const double, CACHE_LINE_SIZE,
+                                 ROW_PREFIX_ELEMENTS * sizeof(double)>;
 
   // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
@@ -90,41 +123,33 @@ public:
   std::size_t get_rows() const noexcept { return rows_; }
   std::size_t get_cols() const noexcept { return cols_; }
 
-  // Returns iterator to the beginning of a row.
-  iterator row_begin(std::size_t row) noexcept {
-    return data.begin() + ROW_PREFIX_ELEMENTS + row * stride_;
+  row_view row(std::size_t i) noexcept {
+    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_, cols_};
   }
 
-  // Returns iterator to the beginning of a row.
-  const_iterator row_begin(std::size_t row) const noexcept {
-    return data.cbegin() + ROW_PREFIX_ELEMENTS + row * stride_;
+  const_row_view row(std::size_t i) const noexcept {
+    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_, cols_};
   }
 };
 
 namespace {
 
-// Apply one logical row from iterators to its aligned first interior cell.
-inline void apply_stencil_row(Grid::const_iterator above,
-                              Grid::const_iterator center,
-                              Grid::const_iterator below, Grid::iterator output,
-                              std::size_t interior_cols) noexcept {
-  output[-1] = center[-1];
-  output[interior_cols] = center[interior_cols];
-
-  // Extract raw pointers, required for compiler to output aligned SIMD code.
-  const double *const above_data = &*above;
-  const double *const center_data = &*center;
-  const double *const below_data = &*below;
-  double *const output_data = &*output;
+// Apply one logical row, keeping the first interior cell aligned for SIMD.
+inline void apply_stencil_row(Grid::const_row_view above,
+                              Grid::const_row_view center,
+                              Grid::const_row_view below,
+                              Grid::row_view output) noexcept {
+  const std::size_t interior_cols = output.size() - 2;
+  output[0] = center[0];
+  output[output.size() - 1] = center[output.size() - 1];
 
   // Using SIMD between cells due to independence, apply the stencil kernel to
   // the interior of the row.
-#pragma omp simd aligned(above_data, center_data, below_data,                  \
-                             output_data : CACHE_LINE_SIZE)
+#pragma omp simd
   for (std::size_t j = 0; j < interior_cols; ++j) {
-    output_data[j] = 0.125 * (above_data[j] + center_data[j - 1] +
-                              center_data[j + 1] + below_data[j]) +
-                     0.5 * center_data[j];
+    output[j + 1] =
+        0.125 * (above[j + 1] + center[j] + center[j + 2] + below[j + 1]) +
+        0.5 * center[j + 1];
   }
 }
 
@@ -136,9 +161,8 @@ inline void apply_stencil_interior(const Grid &old_grid, Grid &new_grid) {
   // output.
 #pragma omp parallel for schedule(static) if (rows * cols >= OPENMP_MIN_CELLS)
   for (std::size_t i = 1; i < rows - 1; ++i) {
-    apply_stencil_row(old_grid.row_begin(i - 1) + 1, old_grid.row_begin(i) + 1,
-                      old_grid.row_begin(i + 1) + 1, new_grid.row_begin(i) + 1,
-                      cols - 2);
+    apply_stencil_row(old_grid.row(i - 1), old_grid.row(i), old_grid.row(i + 1),
+                      new_grid.row(i));
   }
 }
 
@@ -151,11 +175,12 @@ inline bool apply_stencil_boundary(const Grid &old_grid, Grid &new_grid) {
   if (rows == 0 || cols == 0)
     return true;
 
-  std::copy_n(old_grid.row_begin(0), cols, new_grid.row_begin(0));
+  const auto first_row = old_grid.row(0);
+  std::copy(first_row.begin(), first_row.end(), new_grid.row(0).begin());
 
   if (rows > 1) {
-    std::copy_n(old_grid.row_begin(rows - 1), cols,
-                new_grid.row_begin(rows - 1));
+    const auto last_row = old_grid.row(rows - 1);
+    std::copy(last_row.begin(), last_row.end(), new_grid.row(rows - 1).begin());
   }
 
   if (rows < 3)
@@ -163,8 +188,8 @@ inline bool apply_stencil_boundary(const Grid &old_grid, Grid &new_grid) {
 
   if (cols < 3) {
     for (std::size_t i = 1; i < rows - 1; ++i) {
-      const auto old_row = old_grid.row_begin(i);
-      const auto new_row = new_grid.row_begin(i);
+      const auto old_row = old_grid.row(i);
+      const auto new_row = new_grid.row(i);
       new_row[0] = old_row[0];
       if (cols == 2)
         new_row[1] = old_row[1];
