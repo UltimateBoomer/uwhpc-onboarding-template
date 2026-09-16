@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <new>
@@ -55,31 +56,54 @@ bool operator!=(const AlignedAllocator<T, Alignment> &,
   return false;
 }
 
-// Non-owning view of a logical row, excluding storage padding. Grid guarantees
-// that its pointer is ROW_PREFIX_ELEMENTS doubles past a cache-line boundary.
-template <typename T> class RowView {
-  static_assert(CACHE_LINE_SIZE >= alignof(T));
-  static_assert((ROW_PREFIX_ELEMENTS * sizeof(double)) % alignof(T) == 0);
+template <std::size_t Rank> struct Extents {
+  std::array<std::size_t, Rank> dimensions;
+
+  template <std::size_t Dimension>
+  constexpr std::size_t extent() const noexcept {
+    static_assert(Dimension < Rank);
+    return dimensions[Dimension];
+  }
+};
+
+// Non-owning view with a compile-time alignment contract for its data handle.
+template <typename T, std::size_t Rank,
+          std::size_t Alignment = alignof(T),
+          std::size_t AlignmentOffset = 0>
+class View {
+  static_assert(Alignment >= alignof(T));
+  static_assert((Alignment & (Alignment - 1)) == 0);
+  static_assert(AlignmentOffset < Alignment);
+  static_assert(AlignmentOffset % alignof(T) == 0);
 
   T *data_;
-  std::size_t size_;
+  Extents<Rank> extents_;
 
 public:
-  constexpr RowView(T *data, std::size_t size) noexcept
-      : data_(data), size_(size) {}
+  constexpr View(T *data, Extents<Rank> extents) noexcept
+      : data_(data), extents_(extents) {}
 
-  T &operator[](std::size_t j) const noexcept { return data()[j]; }
   T *data() const noexcept {
 #if defined(__GNUC__) || defined(__clang__)
     return static_cast<T *>(__builtin_assume_aligned(
-        data_, CACHE_LINE_SIZE, ROW_PREFIX_ELEMENTS * sizeof(double)));
+        data_, Alignment, AlignmentOffset));
 #else
     return data_;
 #endif
   }
-  constexpr std::size_t size() const noexcept { return size_; }
+
+  template <std::size_t Dimension>
+  constexpr std::size_t extent() const noexcept {
+    return extents_.template extent<Dimension>();
+  }
+
+  T &operator[](std::size_t index) const noexcept { return data()[index]; }
+  constexpr std::size_t size() const noexcept {
+    static_assert(Rank == 1);
+    return extent<0>();
+  }
   T *begin() const noexcept { return data(); }
-  T *end() const noexcept { return size_ == 0 ? data() : data() + size_; }
+  T *end() const noexcept { return size() == 0 ? data() : data() + size(); }
 };
 
 // Starter Grid for the 2D heat-diffusion problem.
@@ -92,18 +116,19 @@ private:
   using storage_type =
       std::vector<double, AlignedAllocator<double, CACHE_LINE_SIZE>>;
 
-  std::size_t rows_;
-  std::size_t cols_;
+  Extents<2> extents_;
   std::size_t stride_;
   storage_type data;
 
 public:
-  using row_view = RowView<double>;
-  using const_row_view = RowView<const double>;
+  using row_view = View<double, 1, CACHE_LINE_SIZE,
+                        ROW_PREFIX_ELEMENTS * sizeof(double)>;
+  using const_row_view = View<const double, 1, CACHE_LINE_SIZE,
+                              ROW_PREFIX_ELEMENTS * sizeof(double)>;
 
   // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
-      : rows_(rows), cols_(cols),
+      : extents_{{rows, cols}},
         stride_((cols + ROW_PREFIX_ELEMENTS + CACHE_LINE_ELEMENTS - 1) /
                 CACHE_LINE_ELEMENTS * CACHE_LINE_ELEMENTS),
         data(rows * stride_) {}
@@ -116,15 +141,17 @@ public:
     return data[ROW_PREFIX_ELEMENTS + i * stride_ + j];
   }
 
-  std::size_t get_rows() const noexcept { return rows_; }
-  std::size_t get_cols() const noexcept { return cols_; }
+  std::size_t get_rows() const noexcept { return extents_.extent<0>(); }
+  std::size_t get_cols() const noexcept { return extents_.extent<1>(); }
 
   row_view row(std::size_t i) noexcept {
-    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_, cols_};
+    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_,
+            Extents<1>{{extents_.extent<1>()}}};
   }
 
   const_row_view row(std::size_t i) const noexcept {
-    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_, cols_};
+    return {data.data() + ROW_PREFIX_ELEMENTS + i * stride_,
+            Extents<1>{{extents_.extent<1>()}}};
   }
 };
 
