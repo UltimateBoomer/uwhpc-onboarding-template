@@ -12,6 +12,8 @@ inline constexpr std::size_t CACHE_LINE_ELEMENTS =
     CACHE_LINE_SIZE / sizeof(double);
 inline constexpr std::size_t ROW_PREFIX_ELEMENTS = CACHE_LINE_ELEMENTS - 1;
 
+// Allocator that gives vector storage a cacheline-aligned
+// base address.
 template <typename T, std::size_t Alignment> class AlignedAllocator {
 public:
   using value_type = T;
@@ -53,15 +55,11 @@ bool operator!=(const AlignedAllocator<T, Alignment> &,
   return false;
 }
 
-// Non-owning view of a logical row, excluding storage padding. The caller must
-// ensure the pointer is AlignmentOffset bytes past an Alignment-byte boundary.
-template <typename T, std::size_t Alignment = alignof(T),
-          std::size_t AlignmentOffset = 0>
-class RowView {
-  static_assert(Alignment >= alignof(T));
-  static_assert((Alignment & (Alignment - 1)) == 0);
-  static_assert(AlignmentOffset < Alignment);
-  static_assert(AlignmentOffset % alignof(T) == 0);
+// Non-owning view of a logical row, excluding storage padding. Grid guarantees
+// that its pointer is ROW_PREFIX_ELEMENTS doubles past a cache-line boundary.
+template <typename T> class RowView {
+  static_assert(CACHE_LINE_SIZE >= alignof(T));
+  static_assert((ROW_PREFIX_ELEMENTS * sizeof(double)) % alignof(T) == 0);
 
   T *data_;
   std::size_t size_;
@@ -73,8 +71,8 @@ public:
   T &operator[](std::size_t j) const noexcept { return data()[j]; }
   T *data() const noexcept {
 #if defined(__GNUC__) || defined(__clang__)
-    return static_cast<T *>(
-        __builtin_assume_aligned(data_, Alignment, AlignmentOffset));
+    return static_cast<T *>(__builtin_assume_aligned(
+        data_, CACHE_LINE_SIZE, ROW_PREFIX_ELEMENTS * sizeof(double)));
 #else
     return data_;
 #endif
@@ -100,10 +98,8 @@ private:
   storage_type data;
 
 public:
-  using row_view =
-      RowView<double, CACHE_LINE_SIZE, ROW_PREFIX_ELEMENTS * sizeof(double)>;
-  using const_row_view = RowView<const double, CACHE_LINE_SIZE,
-                                 ROW_PREFIX_ELEMENTS * sizeof(double)>;
+  using row_view = RowView<double>;
+  using const_row_view = RowView<const double>;
 
   // Initializes a zero-filled grid with the specified dimensions.
   Grid(std::size_t rows, std::size_t cols)
